@@ -275,7 +275,7 @@ const std = namespace(() => {
   function Type(func, depth=0) {
     expect(func).typeIs("function");
     expect(depth).typeIs("number");
-    expect(func[sSize]).typeIs("number");
+    //expect(func[sSize]).typeIs("number");
 
     this[sCtor] = func;
     this[sDepth] = depth;
@@ -291,6 +291,7 @@ const std = namespace(() => {
       return new this[sCtor](offset, value);
     if (value != undefined)
       copyBytes(typeof value == "number" ? value : value[sOffset], this[sOffset], this.size());
+    
     return new this[sCtor](offset);
   };
 
@@ -314,7 +315,7 @@ const std = namespace(() => {
     return size;
   };
 
-  function toAddress(value) {
+  const toAddress = (value) => {
     if (typeof value == "number")
       return value;
     if (value instanceof Pointer)
@@ -323,7 +324,7 @@ const std = namespace(() => {
     if (typeof value == "object" && typeof (addr = value[sOffset]) == "number")
       return addr;
     throw new TypeError("Unable to convert 'value' to address.");
-  }
+  };
 
   function Pointer(func, depth, offset, value) {
     this[sCtor] = func;
@@ -339,20 +340,18 @@ const std = namespace(() => {
   }
 
   Pointer.prototype.deref = function(value) {
-    if (this.isNullptr()) throw new Error("Unable to dereference a null pointer.");
+    let offset = load.u32(this[sOffset]);
+    if (offset == 0) throw new Error("unable to dereference a null pointer.");
     if (value != undefined) {
-      if (this[sDepth] > 1) {
-        if (value instanceof Pointer) {
-          if ((this[sDepth] - 1) != value[sDepth])
-            throw new Error("Invalid pointer.");
-          store.u32(this[sOffset], value[sOffset]);
-        }
-      }
+      if (this[sDepth] == 1)
+        return (new Type(this[sCtor])).init(offset, value);
+      expect(value).typeIs("number");
+      store.u32(this[sOffset], value);
       return value;
     } else {
       if (this[sDepth] == 1)
-        return new this[sCtor](load.u32(this[sOffset]));
-      return new Pointer(this[sCtor], this[sDepth] - 1, load.u32(this[sOffset]));
+        return new this[sCtor](offset);
+      return new Pointer(this[sCtor], this[sDepth] - 1, offset);
     }
   };
 
@@ -466,10 +465,30 @@ const std = namespace(() => {
 
   Char[sSize] = 1;
   primitives.add(Char);
-
+  
   const char = new Type(Char);
   const charptr = new Type(Char, 1);
   const charptrptr = new Type(Char, 2);
+  
+  // implementation of boolean type
+  function Bool(offset, value) {
+    expect(offset).typeIs("number");
+    this[sOffset] = offset;
+    if (value != undefined)
+      store.u8(offset, value instanceof Bool ? load.u8(value[sOffset])
+        : (typeof value == "boolean" ? (value ? 1 : 0) : value));
+  }
+  
+  Bool.prototype.valueOf = function() {
+    return load.u8(this[sOffset]) > 0;
+  };
+
+  Bool[sSize] = 1;
+  primitives.add(Bool);
+
+  const bool = new Type(Bool);
+  const boolptr = new Type(Bool, 1);
+  const boolptrptr = new Type(Bool, 2);
 
   // implementation of signed int type
   function Int32(offset, value) {
@@ -486,6 +505,42 @@ const std = namespace(() => {
 
   Int32[sSize] = 4;
   primitives.add(Int32);
+
+  // implementation of float type
+  function Float(offset, value) {
+    expect(offset).typeIs("number");
+    this[sOffset] = offset;
+
+    if (value != undefined)
+      store.f32(offset, value instanceof Int32 ? load.f32(value[sOffset]) : value);
+  }
+
+  Float.prototype.valueOf = function() {
+    return load.f32(this[sOffset]);
+  };
+
+  Float[sSize] = 4;
+  primitives.add(Float);
+  
+  const float = new Type(Float);
+  const floatptr = new Type(Float, 1);
+  const floatptrptr = new Type(Float, 2);
+
+  // implementation of double type
+  function Double(offset, value) {
+    expect(offset).typeIs("number");
+    this[sOffset] = offset;
+
+    if (value != undefined)
+      store.f64(offset, value instanceof Int32 ? load.f64(value[sOffset]) : value);
+  }
+
+  Double.prototype.valueOf = function() {
+    return load.f64(this[sOffset]);
+  };
+
+  Double[sSize] = 8;
+  primitives.add(Double);
 
 
   // implementation of string utf-8 type
@@ -518,6 +573,19 @@ const std = namespace(() => {
   StringUtf8[sSize] = 4;
   primitives.add(StringUtf8);
 
+  const set = (obj, value) => {
+    if (obj instanceof Pointer)
+      store.u32(obj[sOffset], value);
+  };
+
+  const offsetOf = (obj) => {
+    return obj[sOffset];
+  };
+
+  const sizeOf = (obj) => {
+    return obj[sSize];
+  };
+
   const string = new Type(StringUtf8);
   const stringptr = new Type(StringUtf8, 1);
   const stringptrptr = new Type(StringUtf8, 2);
@@ -526,17 +594,106 @@ const std = namespace(() => {
     if (obj1 instanceof Pointer && obj2 instanceof Pointer)
       return obj1[sOffset] == obj2[sOffset] && obj1[sCtor] == obj2[sCtor]
         && obj1[sDepth] == obj2[sDepth];
-
   };
 
   const i32 = new Type(Int32);
   const i32ptr = new Type(Int32, 1);
   const i32ptrptr = new Type(Int32, 2);
-  return { Type, Pointer, load, store, i32, i32ptr, i32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr };
+
+  const getGetterSetter = (type, offset) => {
+    return {
+      get() {
+        return type.init(this[sOffset] + offset);
+      },
+      set(value) {
+        return type.init(this[sOffset] + offset, value);
+      }
+    };
+  };
+
+  const struct = (obj, prop, isUnion = false) => {
+    let offset = Object.getPrototypeOf(obj).constructor[sSize] || 0;
+    let size = 0;
+    let sizes = [8,4,2];
+    for (let name in prop) {
+      let type = prop[name];
+      expect(type).isInstanceOf(Type);
+      
+      for (let index = 0; index < 3; index++) {
+        let modulo = sizes[index];
+        if (type.size() % modulo == 0 && offset % modulo != 0 && type.size() == modulo) {
+          offset = roundup(offset, modulo);
+          break;
+        }
+      }
+      
+      let getset = getGetterSetter(type, offset);
+      Object.defineProperty(obj, name, {
+        get: getset.get,
+        set: getset.set,
+        enumerable: true,
+        configurable: false
+      });
+      
+      !isUnion ? offset += type.size(): size = Math.max(offset, size);
+    }
+
+    obj.constructor[sSize] = !isUnion ? roundup(offset, 4) : roundup(size, 4);
+  };
+  
+  struct.init = function(object, pointer, args) {
+    expect(object).typeIs("object");
+    let constructor = object[object.constructor.name] || function() { };
+    let size = object.constructor[sLength];
+    
+    if (pointer == undefined) {
+      pointer = alloc(size);
+      args = [];
+    }
+    
+    if (typeof pointer == "number") {
+      object[sOffset] = pointer;
+      if (Array.isArray(args))
+        constructor.apply(object, args);
+      return;
+    }
+
+    if (Array.isArray(pointer)) {
+      args = pointer;
+      pointer = alloc(size);
+      object[sOffset] = pointer;
+      constructor.apply(object, args);
+      return;
+    }
+    throw new Error("Invalid arguments.");
+  };
+  
+  struct.type = function type(func) {
+    return new Type(func);
+  };
+  
+  struct.pointer = function pointer(func, depth=1) {
+    expect(pointer).typeIs("number");
+    return new Type(func, depth);
+  };
+  
+  return { sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, i32, i32ptr, i32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
-let i = std.i32.init(0, 1024);
-let i0 = std.i32ptr.init(0, i);
-let i1 = std.i32ptrptr.init(0, i0);
+const { struct, bool, i32, float, string, sOffset } = std;
+
+function FlagValue() {
+  struct.init(this, ...arguments);
+}
+
+std.struct(FlagValue.prototype, {
+  b: bool,
+  i: i32,
+  f: float,
+  s: string
+});
+
+var f = new FlagValue(4);
+console.log(f.b[sOffset], f.i[sOffset], f.f[sOffset], f.s[sOffset]);
 
 debugger;
