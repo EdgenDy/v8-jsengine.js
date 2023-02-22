@@ -469,6 +469,10 @@ const std = namespace(() => {
   const char = new Type(Char);
   const charptr = new Type(Char, 1);
   const charptrptr = new Type(Char, 2);
+
+  const u8 = char;
+  const u8ptr = charptr;
+  const u8ptrptr = charptrptr;
   
   // implementation of boolean type
   function Bool(offset, value) {
@@ -505,6 +509,30 @@ const std = namespace(() => {
 
   Int32[sSize] = 4;
   primitives.add(Int32);
+
+  const i32 = new Type(Int32);
+  const i32ptr = new Type(Int32, 1);
+  const i32ptrptr = new Type(Int32, 2);
+
+  // implementation of UNsigned int type
+  function Uint32(offset, value) {
+    expect(offset).typeIs("number");
+    this[sOffset] = offset;
+
+    if (value != undefined)
+      store.u32(offset, value instanceof Int32 ? load.u32(value[sOffset]) : value);
+  }
+
+  Uint32.prototype.valueOf = function() {
+    return load.u32(this[sOffset]);
+  };
+
+  Uint32[sSize] = 4;
+  primitives.add(Uint32);
+
+  const u32 = new Type(Int32);
+  const u32ptr = new Type(Int32, 1);
+  const u32ptrptr = new Type(Int32, 2);
 
   // implementation of float type
   function Float(offset, value) {
@@ -596,10 +624,6 @@ const std = namespace(() => {
         && obj1[sDepth] == obj2[sDepth];
   };
 
-  const i32 = new Type(Int32);
-  const i32ptr = new Type(Int32, 1);
-  const i32ptrptr = new Type(Int32, 2);
-
   const getGetterSetter = (type, offset) => {
     return {
       get() {
@@ -673,27 +697,179 @@ const std = namespace(() => {
   };
   
   struct.pointer = function pointer(func, depth=1) {
-    expect(pointer).typeIs("number");
+    expect(depth).typeIs("number");
     return new Type(func, depth);
   };
   
-  return { sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, i32, i32ptr, i32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
+  return { sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
 const { struct, bool, i32, float, string, sOffset } = std;
 
-function FlagValue() {
-  struct.init(this, ...arguments);
-}
+debugger;
 
-std.struct(FlagValue.prototype, {
-  b: bool,
-  i: i32,
-  f: float,
-  s: string
+
+const v8 = namespace((v8) => {
+  const _ = "prototype";
+  const { u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
+  const $type = struct.type;
+  const $ptr = struct.pointer;
+  
+  const internal = namespace((internal) => {
+    const KB = 1024;
+    const MB = KB * KB;
+    const kMaxInt = 0x7FFFFFFF;
+  
+    const kIntSize = 4;
+    // int size in 32 bit machine
+    const kPointerSize = 4;
+    // pointer size in 32 bit machine
+  
+    const kHeapObjectTag = 1;
+
+    const kFailureTag = 3;
+    const kFailureTagSize = 2;
+    const kFailureTagMask = (1 << kFailureTagSize) - 1;
+  
+    const kBitsPerByte = 8;
+    const kBitsPerPointer = kPointerSize * kBitsPerByte;
+  
+    const Max = (a, b) => a < b ? b : a;
+    const Min = (a, b) => a < b ? a : b;
+  
+    const OffsetFrom = (x) => x - 0;
+    const AddressFrom = (x) => (0 + x);
+  
+    const RoundDown = (x, m) => AddressFrom(OffsetFrom(x) & -m);
+    const RoundUp = (x, m) => RoundDown(x + m - 1, m);
+  
+    const RoundUpToPowerOf2 = (x) => {
+      x = x - 1;
+      x = x | (x >> 1);
+      x = x | (x >> 2);
+      x = x | (x >> 4);
+      x = x | (x >> 8);
+      x = x | (x >> 16);
+      return x + 1;
+    }
+    
+    const AllocationSpace = {
+      NEW_SPACE: 0,
+      OLD_SPACE: 1,
+      CODE_SPACE: 2,
+      MAP_SPACE: 3,
+      LO_SPACE: 4,
+      FIRST_SPACE: 0,
+      LAST_SPACE: 4
+    };
+
+    const Address = u8ptr;
+
+    // class FlagValue
+    function FlagValue() {
+      struct.init(this, ...arguments);
+    }
+    
+    FlagValue.New_BOOL = function(b) {
+      let v = new FlagValue();
+      v.b = b;
+      return v;
+    };
+    
+    FlagValue.New_INT = function() {
+      let v = new FlagValue();
+      v.i = i;
+      return v;
+    }
+    
+    FlagValue.New_FLOAT = function() {
+      let v = new FlagValue();
+      v.f = f;
+      return v;
+    }
+    
+    FlagValue.New_STRING = function() {
+      let v = new FlagValue();
+      v.s = s;
+      return v;
+    }
+    
+    struct(FlagValue[_], {
+      b: bool,
+      i: i32,
+      f: float,
+      s: string
+    });
+
+    // class Flag
+    function Flag() {
+      struct.init(this, ...arguments);
+    }
+    
+    Flag.Type = {
+      BOOL: 1, INT: 2, FLOAT: 3, STRING: 4,
+      __proto__: null
+    };
+
+    Flag[_].Flag = function() {
+      console.log(...arguments);
+    }
+
+    Flag[_].file = function() {
+      return this.file_;
+    }
+    
+    Flag[_].name = function() {
+      return this.name_;
+    }
+    
+    Flag[_].comment = function() {
+      return this.comment_;
+    }
+    
+    Flag[_].type = function() {
+      return this.type_;
+    }
+    
+    Flag[_].bool_variable = function(value) {
+      if (value == undefined)
+        return this.variable_.b; 
+      return this.variable_.b = value;
+    }
+    
+    Flag[_].int_variable = function(value) {
+      if (value == undefined)
+        return this.variable_.i; 
+      return this.variable_.i = value;
+    }
+    
+    Flag[_].float_variable = function(value) {
+      if (value == undefined)
+        return this.variable_.f; 
+      return this.variable_.f = value;
+    }
+    
+    Flag[_].string_variable = function(value) {
+      if (value == undefined)
+        return this.variable_.s; 
+      return this.variable_.s = value;
+    }
+
+    struct(Flag[_], {
+      file_: string,
+      name_: string,
+      comment_: string,
+      
+      type_: i32,
+      variable_: struct.pointer(FlagValue),
+      default_: struct.type(FlagValue),
+      
+      next_: struct.pointer(Flag) // Flag pointer
+    });
+
+    const flag = new Flag(8);
+    console.log(flag);
+  });
 });
-
-var f = new FlagValue(4);
-console.log(f.b[sOffset], f.i[sOffset], f.f[sOffset], f.s[sOffset]);
 
 debugger;
