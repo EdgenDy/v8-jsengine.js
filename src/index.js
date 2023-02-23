@@ -241,6 +241,10 @@ const std = namespace(() => {
     return offset;
   };
 
+  const free = (offset) => {
+
+  };
+
   const sCtor = Symbol("function");
   const sDepth = Symbol("depth");
   const sType = Symbol("type");
@@ -282,7 +286,7 @@ const std = namespace(() => {
   }
 
   Type.prototype.init = function(offset, value) {
-    if (offset == null || offset == 0)
+    if (offset == null || offset == 0 || offset == undefined)
       offset = this.isPointer() ? alloc(pointer_size) : alloc(this.size());
     expect(offset).typeIs("number");
     if (this.isPointer())
@@ -635,13 +639,13 @@ const std = namespace(() => {
     };
   };
 
-  const struct = (obj, prop, isUnion = false) => {
+  const struct = function struct(obj, prop, isUnion = false) {
     let offset = Object.getPrototypeOf(obj).constructor[sSize] || 0;
     let size = 0;
     let sizes = [8,4,2];
     for (let name in prop) {
       let type = prop[name];
-      expect(type).isInstanceOf(Type);
+      //expect(type).isInstanceOf(Type);
       
       for (let index = 0; index < 3; index++) {
         let modulo = sizes[index];
@@ -659,16 +663,16 @@ const std = namespace(() => {
         configurable: false
       });
       
-      !isUnion ? offset += type.size(): size = Math.max(offset, size);
+      !isUnion ? offset += type.size(): size = Math.max(type.size(), size);
     }
 
     obj.constructor[sSize] = !isUnion ? roundup(offset, 4) : roundup(size, 4);
   };
   
-  struct.init = function(object, pointer, args) {
+  struct.init = function init(object, pointer, args) {
     expect(object).typeIs("object");
     let constructor = object[object.constructor.name] || function() { };
-    let size = object.constructor[sLength];
+    let size = object.constructor[sSize];
     
     if (pointer == undefined) {
       pointer = alloc(size);
@@ -701,17 +705,17 @@ const std = namespace(() => {
     return new Type(func, depth);
   };
   
-  return { sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
+  return { alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
 const { struct, bool, i32, float, string, sOffset } = std;
 
-debugger;
+
 
 
 const v8 = namespace((v8) => {
   const _ = "prototype";
-  const { u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
+  const { alloc, free, offsetOf, sizeOf, u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
   const $type = struct.type;
   const $ptr = struct.pointer;
   
@@ -799,7 +803,7 @@ const v8 = namespace((v8) => {
       i: i32,
       f: float,
       s: string
-    });
+    }, true);
 
     // class Flag
     function Flag() {
@@ -867,9 +871,1429 @@ const v8 = namespace((v8) => {
       next_: struct.pointer(Flag) // Flag pointer
     });
 
-    const flag = new Flag(8);
-    console.log(flag);
+    const Type2String = (type) => {
+      switch (type) {
+        case Flag.Type.BOOL: return "bool";
+        case Flag.Type.INT: return "int";
+        case Flag.Type.FLOAT: return "float";
+        case Flag.Type.STRING: return "string";
+      }
+      return null;
+    };
+
+    const FlagList = new (function FlagList() { });
+    FlagList.Lookup = function(name) {
+      let f = this.list_();
+      while (f != nullptr && name != f.name())
+        f = f.next();
+      return f;
+    }
+    
+    FlagList.SetFlagsFromCommandLine = function(argc, argv, remove_flags) {
+      for (let i = 0; i < argc;) {
+        let j = i;
+        
+        let arg = argv[i++];
+        let { name, value, is_bool } = this.SplitArgument(arg);
+        
+        if (name != null) {
+          let flag = this.Lookup(name);
+          if (flag == nullptr) {
+            if (remove_flags) {
+              continue;
+            } else {
+              console.error("Error: unrecognized flag " + arg + "\n");
+              return j;
+            }
+          }
+          
+          if (flag.type() != Flag.Type.BOOL && value == null) {
+            if (i < argc) {
+              value = argv[i++];
+            } else {
+              console.error("Error: missing value for flag " + arg + " of type " + Type2String(flag.type()) + "\n");
+              return j;
+            }
+          }
+          
+          switch (flag.type()) {
+            case Flag.Type.BOOL:
+              flag.bool_variable(!is_bool);
+              break;
+            case Flag.Type.INT:
+              flag.int_variable(parseInt(value));
+              break;
+            case Flag.Type.FLOAT:
+              flag.float_variable(parseFloat(value));
+              break;
+            case Flag.Type.STRING:
+              flag.string_variable(value);
+              break;
+          }
+          
+          if ((flag.type() == Flag.Type.BOOL && value != null)
+                || (flag.type() != Flag.Type.BOOL && is_bool)) {
+            console.error("Error: illegal value for flag " + arg + " of type " + Type2String(flag.type()) + "\n");
+            return j;
+          }
+          
+          if (remove_flags)
+            while (j < i)
+              argv[j++] = null;
+        }
+      }
+      
+      if (remove_flags) {
+        let j = 0;
+        for (let i = 0; i < argc; i++) {
+          if (argv[i] != null)
+            argv[j++] = argv[i];
+        }
+        argc = j;
+      }
+      
+      return 0;
+    }
+    
+    FlagList.SplitArgument = function(arg) {
+      let name = null;
+      let value = null;
+      let is_bool = false;
+      
+      let arg_arr = arg.split("=");
+      name = arg_arr.length == 0 ? null : arg_arr[0].trim();
+      value = arg_arr.length < 2 ? null : arg_arr[1].trim();
+      
+      if (name && name.charAt(0) == "-")
+        if (name.charAt(1) == "-")
+          name = name.substr(2);
+        else
+          name = name.substr(1);
+      
+      if (name == "no")
+        is_bool = true;
+      
+      return { name, value, is_bool };
+    }
+
+    FlagList.list_ = struct.pointer(Flag).init(0);
+    internal.export({ FlagList });
+    
+    const kIsNotStringMask = 0x80;
+    const kStringTag = 0x0;
+    const kNotStringTag = 0x80;
+
+    const kStringSizeMask = 0x60;
+    const kShortStringTag = 0x0;
+    const kMediumStringTag = 0x20;
+    const kLongStringTag = 0x40;
+
+    const kIsSymbolMask = 0x10;
+    const kNotSymbolTag = 0x0;
+    const kSymbolTag = 0x10;
+
+    const kStringEncodingMask = 0x8;
+    const kTwoByteStringTag = 0x0;
+    const kAsciiStringTag = 0x8;
+
+    const kStringRepresentationMask = 0x07;
+
+    const StringRepresentationTag = {
+      kSeqStringTag: 0x0,
+      kConsStringTag: 0x1,
+      kSlicedStringTag: 0x2,
+      kExternalStringTag: 0x3
+    };
+
+    const InstanceType = {
+      SHORT_SYMBOL_TYPE : kShortStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      MEDIUM_SYMBOL_TYPE : kMediumStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      LONG_SYMBOL_TYPE : kLongStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      SHORT_ASCII_SYMBOL_TYPE : kShortStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      MEDIUM_ASCII_SYMBOL_TYPE : kMediumStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      LONG_ASCII_SYMBOL_TYPE : kLongStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSeqStringTag,
+      SHORT_CONS_SYMBOL_TYPE : kShortStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      MEDIUM_CONS_SYMBOL_TYPE : kMediumStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      LONG_CONS_SYMBOL_TYPE : kLongStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      SHORT_CONS_ASCII_SYMBOL_TYPE : kShortStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      MEDIUM_CONS_ASCII_SYMBOL_TYPE : kMediumStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      LONG_CONS_ASCII_SYMBOL_TYPE : kLongStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kConsStringTag,
+      SHORT_SLICED_SYMBOL_TYPE : kShortStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      MEDIUM_SLICED_SYMBOL_TYPE : kMediumStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      LONG_SLICED_SYMBOL_TYPE : kLongStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      SHORT_SLICED_ASCII_SYMBOL_TYPE : kShortStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      MEDIUM_SLICED_ASCII_SYMBOL_TYPE : kMediumStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      LONG_SLICED_ASCII_SYMBOL_TYPE : kLongStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kSlicedStringTag,
+      SHORT_EXTERNAL_SYMBOL_TYPE : kShortStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      MEDIUM_EXTERNAL_SYMBOL_TYPE : kMediumStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      LONG_EXTERNAL_SYMBOL_TYPE : kLongStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      SHORT_EXTERNAL_ASCII_SYMBOL_TYPE : kShortStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      MEDIUM_EXTERNAL_ASCII_SYMBOL_TYPE : kMediumStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      LONG_EXTERNAL_ASCII_SYMBOL_TYPE : kLongStringTag | kAsciiStringTag | kSymbolTag | StringRepresentationTag.kExternalStringTag,
+      SHORT_STRING_TYPE : kShortStringTag | StringRepresentationTag.kSeqStringTag,
+      MEDIUM_STRING_TYPE : kMediumStringTag | StringRepresentationTag.kSeqStringTag,
+      LONG_STRING_TYPE : kLongStringTag | StringRepresentationTag.kSeqStringTag,
+      SHORT_ASCII_STRING_TYPE : kShortStringTag | kAsciiStringTag | StringRepresentationTag.kSeqStringTag,
+      MEDIUM_ASCII_STRING_TYPE : kMediumStringTag | kAsciiStringTag | StringRepresentationTag.kSeqStringTag,
+      LONG_ASCII_STRING_TYPE : kLongStringTag | kAsciiStringTag | StringRepresentationTag.kSeqStringTag,
+      SHORT_CONS_STRING_TYPE : kShortStringTag | StringRepresentationTag.kConsStringTag,
+      MEDIUM_CONS_STRING_TYPE : kMediumStringTag | StringRepresentationTag.kConsStringTag,
+      LONG_CONS_STRING_TYPE : kLongStringTag | StringRepresentationTag.kConsStringTag,
+      SHORT_CONS_ASCII_STRING_TYPE : kShortStringTag | kAsciiStringTag | StringRepresentationTag.kConsStringTag,
+      MEDIUM_CONS_ASCII_STRING_TYPE : kMediumStringTag | kAsciiStringTag | StringRepresentationTag.kConsStringTag,
+      LONG_CONS_ASCII_STRING_TYPE : kLongStringTag | kAsciiStringTag | StringRepresentationTag.kConsStringTag,
+      SHORT_SLICED_STRING_TYPE : kShortStringTag | StringRepresentationTag.kSlicedStringTag,
+      MEDIUM_SLICED_STRING_TYPE : kMediumStringTag | StringRepresentationTag.kSlicedStringTag,
+      LONG_SLICED_STRING_TYPE : kLongStringTag | StringRepresentationTag.kSlicedStringTag,
+      SHORT_SLICED_ASCII_STRING_TYPE : kShortStringTag | kAsciiStringTag | StringRepresentationTag.kSlicedStringTag,
+      MEDIUM_SLICED_ASCII_STRING_TYPE : kMediumStringTag | kAsciiStringTag | StringRepresentationTag.kSlicedStringTag,
+      LONG_SLICED_ASCII_STRING_TYPE : kLongStringTag | kAsciiStringTag | StringRepresentationTag.kSlicedStringTag,
+      SHORT_EXTERNAL_STRING_TYPE : kShortStringTag | StringRepresentationTag.kExternalStringTag,
+      MEDIUM_EXTERNAL_STRING_TYPE : kMediumStringTag | StringRepresentationTag.kExternalStringTag,
+      LONG_EXTERNAL_STRING_TYPE : kLongStringTag | StringRepresentationTag.kExternalStringTag,
+      SHORT_EXTERNAL_ASCII_STRING_TYPE : kShortStringTag | kAsciiStringTag | StringRepresentationTag.kExternalStringTag,
+      MEDIUM_EXTERNAL_ASCII_STRING_TYPE : kMediumStringTag | kAsciiStringTag | StringRepresentationTag.kExternalStringTag,
+      LONG_EXTERNAL_ASCII_STRING_TYPE : kLongStringTag | kAsciiStringTag | StringRepresentationTag.kExternalStringTag,
+      LONG_PRIVATE_EXTERNAL_ASCII_STRING_TYPE : 75, //LONG_EXTERNAL_ASCII_STRING_TYPE,
+  
+      MAP_TYPE : kNotStringTag,
+      HEAP_NUMBER_TYPE : 129,
+      FIXED_ARRAY_TYPE : 130,
+      CODE_TYPE : 131,
+      ODDBALL_TYPE : 132,
+      PROXY_TYPE : 133,
+      BYTE_ARRAY_TYPE : 134,
+      FILLER_TYPE : 135,
+      SMI_TYPE : 136,
+  
+      ACCESSOR_INFO_TYPE : 137,
+      ACCESS_CHECK_INFO_TYPE : 138,
+      INTERCEPTOR_INFO_TYPE : 139,
+      SHARED_FUNCTION_INFO_TYPE : 140,
+      CALL_HANDLER_INFO_TYPE : 141,
+      FUNCTION_TEMPLATE_INFO_TYPE : 142,
+      OBJECT_TEMPLATE_INFO_TYPE : 143,
+      SIGNATURE_INFO_TYPE : 144,
+      TYPE_SWITCH_INFO_TYPE : 145,
+      DEBUG_INFO_TYPE : 146,
+      BREAK_POINT_INFO_TYPE : 147,
+      SCRIPT_TYPE : 148,
+  
+      JS_OBJECT_TYPE : 149,
+      JS_GLOBAL_OBJECT_TYPE : 150,
+      JS_BUILTINS_OBJECT_TYPE : 151,
+      JS_VALUE_TYPE : 152,
+      JS_ARRAY_TYPE : 153,
+  
+      JS_FUNCTION_TYPE : 154,
+  
+      FIRST_NONSTRING_TYPE : 128,
+      FIRST_TYPE : 0x0,
+      LAST_TYPE : 154,
+      FIRST_JS_OBJECT_TYPE : 149,
+      LAST_JS_OBJECT_TYPE : 153,
+    };
+
+    /** @class Object */
+    function Object() {
+      struct.init(this, ...arguments);
+    }
+
+    Object[_].IsFailure = function() {
+      return (this[sOffset] & kFailureTagMask) == kFailureTag;
+    };
+    
+    Object.kSize = 0;
+    
+    function HeapObject() {
+      Object.call(this, ...arguments);
+    }
+    
+    HeapObject.prototype = { constructor: HeapObject, __proto__: Object.prototype };
+
+    HeapObject[_].set_map = function(value) {
+      this.set_map_word(MapWord.FromMap(value));
+    };
+
+    HeapObject.FromAddress = function(address) {
+      return new HeapObject(address + kHeapObjectTag);
+    };
+    
+    HeapObject.kMapOffset = Object.kSize;
+    HeapObject.kSize = HeapObject.kMapOffset + kPointerSize;
+    
+    function Map() {
+      HeapObject.call(this, ...arguments);
+    }
+    
+    Map.prototype = { constructor: Map, __proto__: HeapObject.prototype };
+    
+    Map.kInstanceAttributesOffset = HeapObject.kSize;
+    Map.kPrototypeOffset = Map.kInstanceAttributesOffset + kIntSize;
+    Map.kConstructorOffset = Map.kPrototypeOffset + kPointerSize;
+    Map.kInstanceDescriptorsOffset =
+        Map.kConstructorOffset + kPointerSize;
+    Map.kCodeCacheOffset = Map.kInstanceDescriptorsOffset + kPointerSize;
+    Map.kSize = Map.kCodeCacheOffset + kIntSize;
+
+    /** @class MapWord */
+    function MapWord() {
+      struct.init(this, ...arguments);
+    }
+    
+    MapWord[_].MapWord = function(value) {
+      this.value_ = value;
+    };
+    
+    MapWord.FromMap = function(map) {
+      return new MapWord(map[sOffset]);
+    };
+    
+    struct(MapWord[_], {
+      value_: u32ptr
+    });
+
+    /** @class V8 */
+    const V8 = new (function V8() {});
+
+    V8.Initialize = function(des) {
+      let create_heap_objects = (des == null);
+      
+      if (this.HasBeenDisposed()) return false;
+      if (this.HasBeenSetup()) return true;
+      this.has_been_setup_ = true;
+      
+      Logger.Setup();
+      if (des != null)
+        des.GetLog();
+        
+      CPU.Setup();
+      OS.Setup();
+      
+      if (!Heap.Setup(create_heap_objects)) {
+        this.has_been_setup_ = false;
+        return false;
+      }
+      
+      return true;
+    };
+    
+    V8.HasBeenSetup = function() {
+      return this.has_been_setup_;
+    };
+    
+    V8.HasBeenDisposed = function() {
+      return this.has_been_disposed_;
+    };
+    
+    V8.has_been_setup_ = false;
+    V8.has_been_disposed_ = false;
+
+    /** @class Snapshot */
+    const Snapshot = new (function Snapshot() { });
+    
+    Snapshot.Initialize = function(snapshot_file = null) {
+      if (snapshot_file) {
+        throw new Error("unimplemented");
+      } else if (this.size_ > 0) {
+        throw new Error("unimplemented");
+      }
+      return false;
+    }
+
+    Snapshot.size_ = 0;
+    internal.export({ Snapshot });
+
+    class Logger {
+      static Setup() {
+        return false;
+      }
+    }
+    
+    class CPU {
+      static Setup() {
+        // nothing to do
+      }
+    }
+
+    const GetPageSize = () => {
+      return 4096; // 32 bit
+    };
+
+    const OS = {};
+    OS.Setup = function() { };
+
+    OS.Allocate = function(requested, allocated, executable) {
+      const msize = RoundUp(requested, GetPageSize());
+      let mbase = alloc(msize);
+      
+      if (mbase == 0) {
+        //LOG(StringEvent("OS::Allocate", "VirtualAlloc failed"));
+        return $.nullptr;
+      }
+
+      allocated.value = msize;
+      UpdateAllocatedSpaceLimits(mbase, msize);
+      return mbase;
+    };
+
+    function Page() {
+      struct.init(this, ...arguments);
+    }
+
+    Page[_].Page = function() {
+
+    };
+
+    Page[_].address = function() {
+      return Address.init(this[sOffset]);
+    };
+
+    Page[_].is_valid = function() {
+      return !this.address().isNullptr();
+    };
+
+    Page[_].ObjectAreaStart = function() {
+      return this.address() + Page.kObjectStartOffset;
+    };
+
+    Page[_].ObjectAreaEnd = function() {
+      return this.address() + Page.kPageSize;
+    };
+
+    Page[_].RSetStart = function() {
+      return this.address() + Page.kRSetStartOffset;
+    }
+
+    Page[_].ClearRSet = function() {
+      new Uint8Array(buffer, this.RSetStart(), Page.kRSetEndOffset - Page.kRSetStartOffset).fill(0);
+    };
+
+    Page[_].next_page = function() {
+      return MemoryAllocator.GetNextPage(this);
+    };
+
+    struct(Page[_], {
+      opaque_header: i32,
+      is_normal_page: i32,
+      mc_relocation_top: Address,
+      mc_page_index: i32,
+      mc_first_forwarded: Address
+    });
+
+    Page.FromAddress = function(a) {
+      return new Page(a & ~Page.kPageAlignmentMask);
+    };
+
+    Page.kPageSizeBits = 13;
+    Page.kPageSize = 1 << Page.kPageSizeBits;
+    Page.kPageAlignmentMask = (1 << Page.kPageSizeBits) - 1;
+    Page.kRSetEndOffset = Page.kPageSize / kBitsPerPointer;
+    Page.kRSetStartOffset = Page.kRSetEndOffset / kBitsPerPointer;
+    Page.kObjectStartOffset = Page.kRSetEndOffset;
+    Page.kObjectAreaSize = Page.kPageSize - Page.kObjectStartOffset;
+    Page.kMaxHeapObjectSize = Page.kObjectAreaSize;
+
+    class Malloced {
+      static New(size) {
+        return alloc(size);
+      }
+      
+      static Delete(ptr) {
+        free(ptr);
+      }
+    }
+    
+    class FreeStoreAllocationPolicy {
+      static New(size) {
+        return Malloced.New(size);
+      }
+      
+      static Delete(ptr) {
+        return Malloced.Delete(ptr);
+      }
+    }
+
+    function StatsCounter() {
+      struct.init(this, ...arguments);
+    }
+
+    StatsCounter[_].StatsCounter = function(name, id) {
+      this.id_ = id;
+      this.name_ = "c:" + name;
+    };
+
+    StatsCounter[_].Increment = function() {
+      let loc = this.GetPtr();
+      if (!loc.isNullptr()) loc.deref(loc.deref() + 1);
+    };
+
+    StatsCounter[_].GetPtr = function() {
+      if (this.lookup_done_)
+        return this.ptr_;
+      this.lookup_done_ = true;
+      this.ptr_ = StatsTable.FindLocation(name_);
+      return this.ptr_;
+    };
+
+    struct(StatsCounter[_], {
+      name_: string,
+      lookup_done_: bool,
+      ptr_: i32ptr,
+      id_: i32
+    });
+
+    /** @class Counters */
+    const Counters = new (function Counters() { });
+    Counters.memory_allocated = new StatsCounter();
+
+    /** @class ChunkInfo */
+    function ChunkInfo() {
+      struct.init(this, ...arguments);
+    }
+    
+    ChunkInfo[_].ChunkInfo = function() {
+      
+    };
+
+    ChunkInfo[_].address = function() {
+      return this.address_;
+    };
+    
+    ChunkInfo[_].init = function(a, s, o) {
+      this.address_ = a;
+      this.size_ = s;
+      this.owner_ = o;
+    };
+    
+    struct(ChunkInfo[_], {
+      address_: u8ptr,
+      size_: i32,
+      owner_: i32ptr //owner_ PagedSpace pointer.
+    });
+
+    /** @class List */
+    const List = new (function List() { });
+
+    /** @class List<ChunkInfo> */
+    List["ChunkInfo"] = function List() {
+      struct.init(this, ...arguments);
+    };
+
+    List["ChunkInfo"][_].List = function(capacity) {
+      this.Initialize(capacity);
+    };
+
+    List["ChunkInfo"][_].Initialize = function(capacity) {
+      this.data_ = (capacity > 0) ? this.NewData(capacity) : NULL;
+      this.capacity_ = capacity;
+      this.length_ = 0;
+    };
+
+    List["ChunkInfo"][_].NewData = function(n) {
+      return FreeStoreAllocationPolicy.New(n * sizeOf(ChunkInfo));
+    };
+
+    List["ChunkInfo"][_].Add = function(element) {
+      if (this.length_ >= this.capacity_) {
+        throw new Error("Unimplemented List[ChunkInfo]");
+      }
+      let index = this.length_.valueOf();
+      this.length_ = index + 1;
+      return this.data_.put(index, element);
+    };
+
+    List["ChunkInfo"][_].at = function(i) {
+      return this.data_.at(i);
+    };
+
+    List["ChunkInfo"][_].put = function(i, e) {
+      return this.data_.put(i, e);
+    };
+
+    struct(List["ChunkInfo"][_], {
+      data_: struct.pointer(ChunkInfo),
+      capacity_: i32,
+      length_: i32
+    });
+
+    /** @class List<int> */
+    List["int"] = function List() {
+      struct.init(this, ...arguments);
+    };
+
+    List["int"][_].List = function(capacity) {
+      this.Initialize(capacity);
+    };
+
+    List["int"][_].Initialize = function(capacity) {
+      this.data_ = (capacity > 0) ? this.NewData(capacity) : NULL;
+      this.capacity_ = capacity;
+      this.length_ = 0;
+    };
+
+    List["int"][_].NewData = function(n) {
+      return FreeStoreAllocationPolicy.New(n * 4);
+    };
+
+    List["int"][_].Add = function(element) {
+      if (this.length_ >= this.capacity_) {
+        throw new Error("Unimplemented List[int]");
+      }
+      let index = this.length_.valueOf();
+      this.length_ = index + 1;
+      return this.data_.put(index, element);
+    }
+
+    List["int"][_].at = function(i) {
+      return this.data_.at(i);
+    };
+
+    List["int"][_].put = function(i, e) {
+      return this.data_.put(i, e);
+    };
+
+    struct(List["int"][_], {
+      data_: i32ptr,
+      capacity_: i32,
+      length_: i32
+    });
+
+    let lowest_ever_allocated = voidptr.init(-1);
+    let highest_ever_allocated = voidptr.init(0);
+    
+    const UpdateAllocatedSpaceLimits = (address, size) => {
+      lowest_ever_allocated = Min(lowest_ever_allocated, address);
+      highest_ever_allocated = Max(highest_ever_allocated, voidptr.init(address + size));
+    };
+    
+    /** @class VirtualMemory */
+    function VirtualMemory() {
+      struct.init(this, ...arguments);
+    }
+    
+    VirtualMemory[_].VirtualMemory = function(size, address_hint = 0) {
+      this.address_ = alloc(size);
+      this.size_ = size;
+    };
+    
+    VirtualMemory[_].IsReserved = function() {
+      return !this.address_.isNullptr();
+    };
+    
+    VirtualMemory[_].address = function() {
+      return this.address_;
+    };
+
+    VirtualMemory[_].Commit = function(address, size, executable) {
+      UpdateAllocatedSpaceLimits(address, size);
+      return true;
+    };
+    
+    struct(VirtualMemory[_], {
+      address_: voidptr,
+      size_: i32
+    });
+
+    /** @class MemoryAllocator */
+    const MemoryAllocator = new (function MemoryAllocator() { });
+
+    MemoryAllocator.ChunkInfo = ChunkInfo;
+      
+    MemoryAllocator.Setup = function(capacity) {
+      this.capacity_ = RoundUp(capacity, Page.kPageSize);
+      this.max_nof_chunks_ = (this.capacity_ / (this.kChunkSize - Page.kPageSize)) + 5;
+
+      if (this.max_nof_chunks_ > this.kMaxNofChunks) return false;
+      
+      this.size_ = 0;
+      
+      let info = new ChunkInfo();
+      for (let i = this.max_nof_chunks_ - 1; i >= 0; i--) {
+        this.chunks_.Add(info);
+        this.free_chunk_ids_.Add(i);
+      }
+      this.top_ = this.max_nof_chunks_;
+      return true;
+    };
+    
+    MemoryAllocator.ReserveInitialChunk = function(requested) {
+      this.initial_chunk_ = new VirtualMemory([requested]);
+      if (!this.initial_chunk_.IsReserved()) {
+        free(this.initial_chunk_);
+        this.initial_chunk_ = $.nullptr;
+        return $.nullptr;
+      }
+      this.size_ = this.size_ + requested;
+      return this.initial_chunk_.address();
+    };
+
+    MemoryAllocator.AllocatePages = function(requested_pages, allocated_pages, owner) {
+      if (requested_pages <= 0) return Page.FromAddress($.nullptr);
+      let chunk_size = $stack.value(parseInt(requested_pages * Page.kPageSize));
+
+      if (this.size_ + chunk_size > this.capacity_) {
+        chunk_size = this.capacity_ - this.size_;
+        requested_pages = chunk_size >> Page.kPageSizeBits;
+    
+        if (requested_pages <= 0) return Page.FromAddress($.nullptr);
+      }
+
+      let chunk = this.AllocateRawMemory(chunk_size.value, chunk_size, owner.executable());
+
+      if (chunk == 0) return Page.FromAddress($.nullptr);
+
+      allocated_pages.value = PagesInChunk(Address.init(null, chunk), chunk_size);
+      if (allocated_pages.value == 0) {
+        FreeRawMemory(chunk, chunk_size);
+        return Page.FromAddress($.nullptr);
+      }
+
+      let chunk_id = this.Pop();
+      this.chunks_.at(chunk_id).init(Address.init(null, chunk), chunk_size, owner);
+
+      return this.InitializePagesInChunk(chunk_id, allocated_pages.value, owner);
+    };
+
+    MemoryAllocator.AllocateRawMemory = function(requested, allocated, executable) {
+      if (this.size_ + requested > this.capacity_) return $.nullptr;
+
+      let mem = OS.Allocate(requested, allocated, executable);
+      let alloced = allocated.value;
+      this.size_ = this.size_ + alloced;
+      Counters.memory_allocated.Increment(alloced);
+      return mem;
+    };
+
+    MemoryAllocator.CommitPages = function(start, size, owner, num_pages) {
+      num_pages.value = PagesInChunk(start, size);
+      if (!this.initial_chunk_.Commit(start, size, owner.executable())) {
+        return Page.FromAddress(nullptr);
+      }
+      Counters.memory_allocated.Increment(size);
+      let chunk_id = this.Pop();
+      this.chunks_.at(chunk_id).init(start, size, owner);
+      return this.InitializePagesInChunk(chunk_id, num_pages, owner);
+    };
+
+    MemoryAllocator.CommitBlock = function(start, size, executable) {
+      if (!this.initial_chunk_.Commit(start, size, executable)) return false;
+      Counters.memory_allocated.Increment(size);
+      return true;
+    };
+
+    MemoryAllocator.Pop = function() {
+      let top = this.top_.valueOf();
+      this.top_ = top - 1;
+      return this.free_chunk_ids_.at(this.top_.valueOf()).valueOf();
+    };
+
+    MemoryAllocator.InitializePagesInChunk = function(chunk_id, pages_in_chunk, owner) {
+      let chunk_start = this.chunks_.at(chunk_id).address();
+      let low = RoundUp(chunk_start, Page.kPageSize);
+
+      let page_addr = low;
+      for (let i = 0; i < pages_in_chunk; i++) {
+        let p = Page.FromAddress(page_addr);
+        p.opaque_header = OffsetFrom(page_addr + Page.kPageSize) | chunk_id;
+        p.is_normal_page = 1;
+        page_addr += Page.kPageSize;
+      }
+
+      let last_page = Page.FromAddress(page_addr - Page.kPageSize);
+      last_page.opaque_header = OffsetFrom(0) | chunk_id;
+
+      return Page.FromAddress(low);
+    };
+
+    MemoryAllocator.GetNextPage = function(p) {
+      let raw_addr = p.opaque_header & ~Page.kPageAlignmentMask;
+      return Page.FromAddress(raw_addr);
+    };
+
+    MemoryAllocator.kMaxNofChunks = 1 << Page.kPageSizeBits;
+    MemoryAllocator.kPagesPerChunk = 64;
+    MemoryAllocator.kChunkSize = MemoryAllocator.kPagesPerChunk * Page.kPageSize;
+
+    MemoryAllocator.capacity_ = 0;
+    MemoryAllocator.size_ = 0;
+    
+    //initial_chunk_ = VirtualMemory;
+    
+    const kEstimatedNumberOfChunks = 1049; //270;
+    MemoryAllocator.chunks_ = new List["ChunkInfo"]([kEstimatedNumberOfChunks]);
+    MemoryAllocator.free_chunk_ids_ = new List["int"]([kEstimatedNumberOfChunks]);
+
+    MemoryAllocator.max_nof_chunks_ = 0;
+    MemoryAllocator.top_ = 0;
+
+    /** @class AllocationInfo */
+    function AllocationInfo() {
+      struct.init(this, ...arguments);      
+    }
+
+    struct(AllocationInfo[_], {
+      top: Address,
+      limit: Address
+    });
+
+    /** @class Space */
+    function Space() {
+      struct.init(this, ...arguments);
+    }
+
+    Space[_].Space = function(id, executable) {
+      this.id_ = id;
+      this.executable_ = executable;
+    }; 
+
+    Space[_].executable = function() {
+      return this.executable_;
+    };
+
+    Space[_].identity = function() {
+      return this.id_;
+    };
+
+    struct(Space[_], {
+      id_: i32,
+      executable_: bool
+    });
+
+    /** @class SemiSpace */
+    function SemiSpace() {
+      Space.call(this, ...arguments);      
+    }
+
+    SemiSpace.prototype = { constructor: SemiSpace, __proto__: Space.prototype };
+
+    SemiSpace[_].SemiSpace = function(initial_capacity, maximum_capacity, id, executable) {
+      this.Space(id, executable);
+      this.capacity_ = initial_capacity;
+      this.maximum_capacity_ = maximum_capacity;
+    };
+
+    SemiSpace[_].Setup = function(start, size) {
+      if (!MemoryAllocator.CommitBlock(start, this.capacity_, this.executable())) {
+        return false;
+      }
+    
+      this.start_ = start;
+      this.address_mask_ = ~(size - 1);
+      this.object_mask_ = this.address_mask_ | kHeapObjectTag;
+      this.object_expected_ = u32.init(null, start) | kHeapObjectTag;
+    
+      this.age_mark_ = this.start_;
+
+      return true;
+    };
+
+    SemiSpace[_].low = function() {
+      return this.start_;
+    };
+
+    SemiSpace[_].high = function() {
+      return this.low() + this.capacity_;
+    };
+
+    struct(SemiSpace[_], {
+      capacity_: i32,
+      maximum_capacity_: i32,
+
+      start_: Address,
+      age_mark_: Address,
+
+      address_mask_: u32,
+      object_mask_: u32,
+      object_expected_: u32
+    });
+
+    /** @class NewSpace */
+    function NewSpace() {
+      Space.call(this, ...arguments);
+    }
+
+    NewSpace.prototype = { constructor: NewSpace, __proto__: Space.prototype };
+
+    NewSpace[_].NewSpace = function(initial_semispace_capacity, maximum_semispace_capacity, id, executable) {
+      this.Space(id, executable);
+      this.maximum_capacity_ = maximum_semispace_capacity;
+      this.capacity_ = initial_semispace_capacity;
+      this.to_space_ = new SemiSpace([this.capacity_, this.maximum_capacity_, id, executable]);
+      this.from_space_ = new SemiSpace([this.capacity_, this.maximum_capacity_, id, executable]);      
+    };
+
+    NewSpace[_].Setup = function(start, size) {
+      if (this.to_space_.isNullptr() || !this.to_space_.deref().Setup(start, this.maximum_capacity_)) {
+        return false;
+      }
+      
+      if (this.from_space_.isNullptr() || !this.from_space_.deref().Setup(start + this.maximum_capacity_, this.maximum_capacity_)) {
+        return false;
+      }
+
+      this.start_ = start;
+      this.address_mask_ = ~(size - 1);
+      this.object_mask_ = this.address_mask_ | kHeapObjectTag;
+      this.object_expected_ = u32.init(null, start) | kHeapObjectTag;
+
+      this.allocation_info_.top = this.to_space_.deref().low();
+      this.allocation_info_.limit = this.to_space_.deref().high();
+      // this.mc_forwarding_info_.top = nullptr; // no need to execute this line
+      // this.mc_forwarding_info_.limit = nullptr; // no need to execute this line
+
+      return true;
+    };
+
+    struct(NewSpace[_], {
+      capacity_: i32,
+      maximum_capacity_: i32,
+
+      to_space_: struct.pointer(SemiSpace), // SemiSpace pointer
+      from_space_: struct.pointer(SemiSpace), // SemiSpace pointer,
+
+      start_: Address,
+      address_mask_: u32,
+      object_mask_: u32,
+      object_expected_: u32,
+
+      allocation_info_: struct.pointer(AllocationInfo),
+      mc_forwarding_info_: struct.pointer(AllocationInfo)
+    });
+
+    /** @class AllocationStats */
+    function AllocationStats() {
+      struct.init(this, ...arguments);
+    }
+
+    AllocationStats[_].Capacity = function() {
+      return this.capacity_;
+    };
+
+    AllocationStats[_].AllocateBytes = function(size_in_bytes) {
+      this.available_ -= size_in_bytes;
+      this.size_ += size_in_bytes;
+    };
+
+    struct(AllocationStats[_], {
+      capacity_: i32,
+      available_: i32,
+      size_: i32,
+      waste_: i32
+    });
+
+    const PagesInChunk = (start, size) => {
+      return (RoundDown(start + size, Page.kPageSize)
+          - RoundUp(start, Page.kPageSize)) >> Page.kPageSizeBits;
+    };
+
+    /** @class PagedSpace */
+    function PagedSpace() {
+      Space.call(this, ...arguments);
+    }
+
+    PagedSpace.prototype = { constructor: PagedSpace, __proto__: Space.prototype };
+    
+    PagedSpace[_].PagedSpace = function(max_capacity, id, executable) {
+      this.max_capacity_ = (RoundDown(max_capacity, Page.kPageSize) / Page.kPageSize) * Page.kObjectAreaSize;
+    };
+
+    PagedSpace[_].Capacity = function() {
+      return this.accounting_stats_.Capacity();
+    };
+
+    PagedSpace[_].Setup = function(start, size) {
+      if (this.HasBeenSetup()) return false;
+
+      let num_pages = { value: 0, valueOf() { return this.value; } };
+      
+      if (PagesInChunk(start, size) > 0) {
+        this.first_page_ = MemoryAllocator.CommitPages(start, size, this, num_pages);
+      } else {
+        let requested_pages = Min(MemoryAllocator.kPagesPerChunk,
+          this.max_capacity_ / Page.kObjectAreaSize);
+          this.first_page_ = MemoryAllocator.AllocatePages(requested_pages, num_pages, this);
+          if (!this.first_page_.deref().is_valid()) return false;
+      }
+
+      for (let p = this.first_page_.deref(); p.is_valid(); p = p.next_page()) {
+        p.ClearRSet();
+      }
+
+      this.SetAllocationInfo(this.allocation_info_, this.first_page_);
+
+      return true;
+    };
+
+    PagedSpace[_].SetAllocationInfo = function(alloc_info, p) {
+      alloc_info.top = p.deref().ObjectAreaStart();
+      alloc_info.limit = p.deref().ObjectAreaEnd();
+    };
+
+    PagedSpace[_].HasBeenSetup = function() {
+      return (this.Capacity() > 0);
+    };
+
+    PagedSpace[_].AllocateRaw = function(size_in_bytes) {
+      let object = this.AllocateLinearly(this.allocation_info_, size_in_bytes);
+      if (object != $.nullptr) return object;
+
+      object = this.SlowAllocateRaw(size_in_bytes);
+      if (object != $.nullptr) return object;
+
+      return Failure.RetryAfterGC(size_in_bytes, this.identity());
+    };
+
+    PagedSpace[_].AllocateLinearly = function(alloc_info, size_in_bytes) {
+      let current_top = alloc_info.top;
+      let new_top = current_top + size_in_bytes;
+
+      if (new_top > alloc_info.limit) return $.nullptr;
+      alloc_info.top = new_top;
+      this.accounting_stats_.AllocateBytes(size_in_bytes);
+      return HeapObject.FromAddress(current_top);
+    }
+
+    struct(PagedSpace[_], {
+      max_capacity_: i32,
+      accounting_stats_: struct.type(AllocationStats),
+      first_page_: struct.pointer(Page),
+      allocation_info_: struct.type(AllocationInfo),
+      mc_forwarding_info_: struct.type(AllocationInfo)
+    });
+
+    /** @class SizeNode */
+    function SizeNode() {
+      struct.init(this, ...arguments);
+    }
+
+    struct(SizeNode[_], {
+      head_node_: Address,
+      next_size_: i32
+    });
+
+    /** @class OldSpaceFressList */
+    function OldSpaceFreeList() {
+      struct.init(this, ...arguments);
+    }
+
+    OldSpaceFreeList[_].OldSpaceFreeList = function(owner) {
+      this.owner_ = owner;
+    };
+
+    OldSpaceFreeList.kMaxBlockSize = Page.kMaxHeapObjectSize;
+    OldSpaceFreeList.kFreeListsLength = OldSpaceFreeList.kMaxBlockSize / kPointerSize + 1;
+    
+    struct(OldSpaceFreeList[_], {
+      owner_: u32,
+      available_: i32,
+      free_: struct.type(SizeNode).array(OldSpaceFreeList.kFreeListsLength),
+      finger_: i32
+    });
+
+    /** @class OldSpace */
+    function OldSpace() {
+      PagedSpace.call(this, ...arguments);
+    }
+
+    OldSpace.prototype = { constructor: OldSpace, __proto__: PagedSpace.prototype };
+
+    OldSpace[_].OldSpace = function(max_capacity, id, executable) {
+      this.PagedSpace(max_capacity, id, executable);
+      this.free_list_ = new OldSpaceFreeList([id]);
+    };
+
+    struct(OldSpace[_], {
+      free_list_: struct.type(OldSpaceFreeList),
+      mc_end_of_relocation_: Address
+    });
+
+    /** @class MapSpaceFreeList */
+    function MapSpaceFreeList() {
+      struct.init(this, ...arguments);
+    }
+    
+    MapSpaceFreeList[_].MapSpaceFreeList = function(owner) {
+      this.owner_ = owner;
+      this.Reset();
+    };
+    
+    MapSpaceFreeList[_].Reset = function() {
+      this.available_ = 0;
+      this.head_ = $.nullptr;
+    }
+    
+    struct(MapSpaceFreeList[_], {
+      available_: i32,
+      head_: Address,
+      owner_: i32
+    });
+
+    /** @class MapSpace */
+    function MapSpace() {
+      PagedSpace.call(this, ...arguments);
+    }
+    
+    MapSpace.prototype = { constructor: MapSpace, __proto__: PagedSpace.prototype };
+    
+    MapSpace[_].MapSpace = function(max_capacity, id) {
+      this.PagedSpace(max_capacity, id, false);
+      this.free_list_ = new MapSpaceFreeList([id]);
+    };
+    
+    MapSpace.kMapPageIndexBits = 10;
+    MapSpace.kMaxMapPageIndex = (1 << MapSpace.kMapPageIndexBits) - 1;
+
+    MapSpace.kPageExtra = Page.kObjectAreaSize % Map.kSize;
+    
+    struct(MapSpace[_], {
+      free_list_: struct.type(MapSpaceFreeList),
+      page_addresses_: Address.array(MapSpace.kMaxMapPageIndex)
+    });
+
+    /** @class LargeObjectChunk */
+    function LargeObjectChunk() {
+      struct.init(this, ...arguments);
+    }
+
+    struct(LargeObjectChunk[_], {
+      next_: struct.pointer(LargeObjectChunk),
+      size_: i32
+    });
+
+    /** @class LargeObjectSpace */
+    function LargeObjectSpace() {
+      Space.call(this, ...arguments);
+    }
+
+    LargeObjectSpace.prototype = { constructor: LargeObjectSpace, __proto__: Space.prototype };
+
+    LargeObjectSpace[_].LargeObjectSpace = function(id, executable) {
+      this.Space(id, executable);
+    };
+
+    LargeObjectSpace[_].Setup = function() {
+      this.first_chunk_ = 0; // nullptr
+      this.size_ = 0;
+      this.page_count_ = 0;
+      return true;
+    };
+
+    struct(LargeObjectSpace[_], {
+      first_chunk_: struct.pointer(LargeObjectChunk),
+      size_: i32,
+      page_count_: i32
+    });
+
+    let FLAG_new_space_size = 0;
+    let FLAG_old_space_size = 0;
+    
+    let heap_configured = false;
+
+    const Heap = (function Heap() {});
+    Heap.HasBeenSetup = function() {
+      return !this.new_space_ == null &&
+        !this.old_space_ == null &&
+        !this.code_space_ == null &&
+        !this.map_space_ == null &&
+        !this.lo_space_ == null;
+    }
+      
+    Heap.ConfigureHeap = function(semispace_size, old_gen_size) {
+      if (this.HasBeenSetup()) return false;
+      
+      if (semispace_size > 0) this.semispace_size_ = semispace_size;
+      if (old_gen_size > 0) this.old_generation_size_ = old_gen_size;
+      
+      this.semispace_size_ = RoundUpToPowerOf2(this.semispace_size_);
+      this.initial_semispace_size_ = Min(this.initial_semispace_size_, this.semispace_size_);
+      this.young_generation_size_ = 2 * this.semispace_size_;
+      
+      this.old_generation_size_ = RoundUp(this.old_generation_size_, Page.kPageSize);
+      
+      heap_configured = true;
+      return true;
+    }
+      
+    Heap.ConfigureHeapDefault = function() {
+      return this.ConfigureHeap(FLAG_new_space_size, FLAG_old_space_size);
+    }
+      
+    Heap.Setup = function(create_heap_objects) {
+      if (!heap_configured) {
+        if (!this.ConfigureHeapDefault()) return false;
+      }
+
+      if (!MemoryAllocator.Setup(this.MaxCapacity())) return false;
+      let chunk = MemoryAllocator.ReserveInitialChunk(2 * this.young_generation_size_);
+      console.log("Heap::Setup");
+      if (chunk.isNullptr()) return false;
+      
+      let old_space_start = Address.init(null, chunk);
+      let new_space_start = RoundUp(old_space_start, this.young_generation_size_);
+      let code_space_start = Address.init(null, new_space_start + this.young_generation_size_);
+      let old_space_size = new_space_start - old_space_start;
+      let code_space_size = this.young_generation_size_ - old_space_size;
+      console.log("chunk: " + 10772000 + "\nold_space_start: " + (+old_space_start),"\nnew_space_start:", new_space_start, "\ncode_space_start:",+code_space_start, "\nold_space_size:",old_space_size, "\ncode_space_size:",code_space_size);
+      
+      this.new_space_ = new NewSpace([this.initial_semispace_size_,
+          this.semispace_size_, AllocationSpace.NEW_SPACE, false]);
+
+      //if (this.new_space_ == null) return false; // i don't why i put this checking 
+      if (!this.new_space_.Setup(new_space_start, this.young_generation_size_))
+        return false;
+      
+      this.old_space_ = new OldSpace([this.old_generation_size_, AllocationSpace.OLD_SPACE, false]);
+      //if (this.old_space_.isNullptr()) return false;
+      if (!this.old_space_.Setup(old_space_start, old_space_size)) return false;
+      
+      this.code_space_ = new OldSpace([this.old_generation_size_, AllocationSpace.CODE_SPACE, true]);
+      //if (this.code_space_.isNullptr()) return false;
+      if (!this.code_space_.Setup(code_space_start, code_space_size)) return false;
+      
+      this.map_space_ = new MapSpace([Heap.kMaxMapSpaceSize, AllocationSpace.MAP_SPACE]);
+      //if (this.map_space_.isNullptr()) return false;
+      if (!this.map_space_.Setup($.nullptr, 0)) return false;
+
+      this.lo_space_ = new LargeObjectSpace([AllocationSpace.LO_SPACE, true]);
+      //if (this.lo_space_.isNullptr()) return false;
+      if (!this.lo_space_.Setup()) return false;
+
+      if (create_heap_objects) {
+        if (!this.CreateInitialMaps()) return false;
+        if (!CreateApiObjects()) return false;
+    
+        if (!CreateInitialObjects()) return false;
+      }
+
+      return true;
+    }
+
+    Heap.CreateInitialMaps = function() {
+      let obj = this.AllocatePartialMap(InstanceType.MAP_TYPE, Map.kSize);
+    };
+
+    Heap.AllocatePartialMap = function(instance_type, instance_size) {
+      let result = this.AllocateRawMap(Map.kSize);
+      if (result.IsFailure()) return result;
+
+      let map = new Map(result[sOffset]);
+      map.set_map(this.meta_map());
+      map.set_instance_type(instance_type);
+      map.set_instance_size(instance_size);
+      map.set_unused_property_fields(0);
+      return result;
+    };
+
+    Heap.AllocateRawMap = function(size_in_bytes) {
+      let result = this.map_space_.deref().AllocateRaw(size_in_bytes);
+      if (result.IsFailure()) this.old_gen_exhausted_ = true;
+      return result;
+    };
+
+    Heap.MaxCapacity = function() {
+      return this.young_generation_size_ + this.old_generation_size_;
+    }
+
+    Heap.meta_map = function() {
+      return this.meta_map_;
+    };
+
+    Heap.semispace_size_ = 0;
+    Heap.initial_semispace_size_ = 0;
+    Heap.young_generation_size_ = 0;
+    Heap.old_generation_size_ = 0;
+      
+    Heap.new_space_growth_limit_ = 0;
+    Heap.scavenge_count_ = 0;
+    Heap.kMaxMapSpaceSize = 0;
+      
+    Heap.new_space_ = null;
+    Heap.old_space_ = null;
+    Heap.code_space_ = null;
+    Heap.map_space_ = null;
+    Heap.lo_space_ = null;
+
+    Heap.old_gen_exhausted_ = 0;
+    Heap.meta_map_ = null;
+
+    Heap.kMaxMapSpaceSize = 8*MB;
+    Heap.semispace_size_  = 1*MB;
+    Heap.old_generation_size_ = 512*MB;
+    Heap.initial_semispace_size_ = 256*KB;
+
+    internal.export({ V8, Page, MemoryAllocator });
+    v8.export({ internal });
+  }); // namespace internal
+
+  const i = internal;
+  
+  class Utils {
+    static ReportApiFailure(location, message) {
+      let callback = GetFatalErrorHandler();
+      callback(location, message);
+      has_shut_down = true;
+      return false;
+    }
+  }
+  
+  const API_FATAL = (location, message, ...args) => {
+    let message_arr = ["\n#\n# Fatal error in " + location + "\n# "];
+    message_arr.push(args.length > 0 ? args[0] : "");
+    message_arr.push("\n#\n\n");
+    throw new Error(message_arr.join(""));
+  };
+  
+  let has_shut_down = false;
+  let exception_behavior = null;
+  
+  const DefaultFatalErrorHandler = (location, message) => {
+    API_FATAL(location, message);
+  };
+
+  const GetFatalErrorHandler = () => {
+    if (exception_behavior == null) {
+      exception_behavior = DefaultFatalErrorHandler;
+    }
+    return exception_behavior;
+  };
+  
+  const ApiCheck = (condition, location, message) => {
+    return condition ? true : Utils.ReportApiFailure(location, message);
+  };
+  
+  const ReportV8Dead = (location) => {
+    let callback = GetFatalErrorHandler();
+    callback(location, "V8 is no longer useable");
+    return true;
+  };
+
+  const IsDeadCheck = (location) => {
+    return has_shut_down ? ReportV8Dead(location) : false;
+  };
+  
+  const EnsureInitialized = (location) => {
+    if (IsDeadCheck(location)) return;
+    ApiCheck(v8.V8.Initialize(), location, "Error initializing V8");
+  };
+
+  
+  const Handle = new (function Handle() { });
+
+  /** @class Handle<FunctionTemplate> */
+  Handle["FunctionTemplate"] = function Handle() {
+    $[0](this, ...arguments);
+  };
+  
+  /** @class Handle<ObjectTemplate> */
+  Handle["ObjectTemplate"] = function Handle() {
+    $[0](this, ...arguments);
+  };
+
+  const Local = new (function Local() {});
+  /** @class Local<FunctionTemplate> */
+  Local["FunctionTemplate"] = function Local() {
+    
+  };
+
+  /** @class Local<ObjectTemplate> */
+  Local["ObjectTemplate"] = function Local() {
+    
+  };
+
+  class V8 {
+    static SetFlagsFromCommandLine(argc, argv, remove_flags) {
+      i.FlagList.SetFlagsFromCommandLine(argc, argv, remove_flags);
+    }
+    
+    static Initialize() {
+      if (i.V8.HasBeenSetup()) return true;
+      let scope = new HandleScope();
+      if (i.Snapshot.Initialize()) {
+        i.Serializer.disable();
+        return true;
+      } else {
+        return i.V8.Initialize(null);
+      }
+    }
+  }
+
+  v8.export({ V8 });
+
+  function HandleScope() {
+    struct.init(this, ...arguments);
+  }
+
+  HandleScope.Data = function Data() {
+    struct.init(this, ...arguments);
+  };
+
+  HandleScope.Data[_].Initialize = function() {
+    this.extensions = -1;
+    this.next = this.limit = nullptr;
+  };
+
+  struct(HandleScope.Data[_], {
+    extensions: i32,
+    next: voidptr,
+    limit: voidptr
   });
+
+  HandleScope[_].HandleScope = function() {
+    this.previous_ = HandleScope.current_;
+    this.is_closed_ = false;
+    HandleScope.current_.extensions = 0;
+  };
+
+  struct(HandleScope[_], {
+    previous_: struct.type(HandleScope.Data),
+    is_closed_: bool
+  });
+
+  HandleScope.current_ = struct.type(HandleScope.Data).init();
+
+  class Data {
+    constructor() {
+      struct.init(this, ...arguments);
+    }
+  }
+
+  class Template extends Data {
+    constructor() {
+      super(...arguments);
+    }
+  }
+
+  class FunctionTemplate extends Template {
+    constructor() {
+      super(...arguments);
+    }
+  }
+
+  class ObjectTemplate extends Template {
+    static New(constructor) {
+      if (constructor == undefined)
+        constructor = new Local["FunctionTemplate"]();
+      if (IsDeadCheck("v8::ObjectTemplate::New()"))
+        return new Local["ObjectTemplate"]();
+      EnsureInitialized("v8::ObjectTemplate::New()");
+    }
+    
+    constructor() {
+      super(...arguments);
+    }
+  }
+
+  v8.export({ ObjectTemplate });
+  
+  v8.export({ Handle, HandleScope });
 });
 
+const main = (args) => {
+  v8.V8.SetFlagsFromCommandLine(args.length, args, true);
+  let handle_scope = new v8.HandleScope([]);
+  let global = v8.ObjectTemplate.New();
+  //console.log(handle_scope, global);
+};
+main([]);
 debugger;
