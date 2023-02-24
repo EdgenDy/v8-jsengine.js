@@ -294,7 +294,7 @@ const std = namespace(() => {
     if (this.isPrimitive())
       return new this[sCtor](offset, value);
     if (value != undefined)
-      copyBytes(typeof value == "number" ? value : value[sOffset], this[sOffset], this.size());
+      copyBytes(typeof value == "number" ? value : value[sOffset], offset, this.size());
     
     return new this[sCtor](offset);
   };
@@ -338,7 +338,7 @@ const std = namespace(() => {
     if (typeof value == "number")
       store.u32(this[sOffset], value);
     else if (value instanceof Pointer)
-      store.u32(this[sOffset], value[sOffset]);
+      store.u32(this[sOffset], depth > 1 ? value[sOffset] : load.u32(value[sOffset]));
     else if (typeof value == "object" && typeof value[sOffset] == "number")
       store.u32(this[sOffset], value[sOffset]);
   }
@@ -704,8 +704,52 @@ const std = namespace(() => {
     expect(depth).typeIs("number");
     return new Type(func, depth);
   };
+
+  const tester_buffer = new ArrayBuffer(64);
+  const tester_i32 = new Int32Array(tester_buffer);
+  const utils = {
+    to: {
+      i32(value) {
+        tester_i32[0] = value;
+        return tester_i32[0];
+      }
+    }
+  };
+
+  const memory = function memory(offset, size) {
+    return {
+      setValue(value) {
+        new Uint8Array(buffer, offset, size).fill(0);
+      },
+      copy(src, dest, size) {
+        new Int8Array(buffer, dest, size).set(new Int8Array(buffer, src, size));
+      }
+    };
+  };
+
+  function StackValue(object) {
+    this.value = object;
+  }
+
+  StackValue.prototype.set = function set(object) {
+    this.value = object;
+  };
+
+  StackValue.prototype.deref = function deref(object) {
+    this.set(object);
+  };
+
+  StackValue.prototype.valueOf = function() {
+    return this.value;
+  };
+
+  const stack = {
+    value(object) {
+      return new StackValue(object);
+    }
+  };
   
-  return { alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
+  return { stack, memory, utils, alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
 const { struct, bool, i32, float, string, sOffset } = std;
@@ -715,7 +759,7 @@ const { struct, bool, i32, float, string, sOffset } = std;
 
 const v8 = namespace((v8) => {
   const _ = "prototype";
-  const { alloc, free, offsetOf, sizeOf, u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
+  const { load, store, stack, memory, utils, alloc, free, offsetOf, sizeOf, u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
   const $type = struct.type;
   const $ptr = struct.pointer;
   
@@ -1229,7 +1273,7 @@ const v8 = namespace((v8) => {
       
       if (mbase == 0) {
         //LOG(StringEvent("OS::Allocate", "VirtualAlloc failed"));
-        return $.nullptr;
+        return 0;
       }
 
       allocated.value = msize;
@@ -1266,7 +1310,8 @@ const v8 = namespace((v8) => {
     }
 
     Page[_].ClearRSet = function() {
-      new Uint8Array(buffer, this.RSetStart(), Page.kRSetEndOffset - Page.kRSetStartOffset).fill(0);
+      // new Uint8Array(buffer, this.RSetStart(), Page.kRSetEndOffset - Page.kRSetStartOffset).fill(0);
+      memory(this.RSetStart(), Page.kRSetEndOffset - Page.kRSetStartOffset).setValue(0);
     };
 
     Page[_].next_page = function() {
@@ -1399,7 +1444,7 @@ const v8 = namespace((v8) => {
         throw new Error("Unimplemented List[ChunkInfo]");
       }
       let index = this.length_.valueOf();
-      this.length_ = index + 1;
+      this.length_++;
       return this.data_.put(index, element);
     };
 
@@ -1501,8 +1546,8 @@ const v8 = namespace((v8) => {
     MemoryAllocator.ChunkInfo = ChunkInfo;
       
     MemoryAllocator.Setup = function(capacity) {
-      this.capacity_ = RoundUp(capacity, Page.kPageSize);
-      this.max_nof_chunks_ = (this.capacity_ / (this.kChunkSize - Page.kPageSize)) + 5;
+      this.capacity_ = utils.to.i32(RoundUp(capacity, Page.kPageSize));
+      this.max_nof_chunks_ = utils.to.i32((this.capacity_ / (this.kChunkSize - Page.kPageSize)) + 5);
 
       if (this.max_nof_chunks_ > this.kMaxNofChunks) return false;
       
@@ -1529,34 +1574,34 @@ const v8 = namespace((v8) => {
     };
 
     MemoryAllocator.AllocatePages = function(requested_pages, allocated_pages, owner) {
-      if (requested_pages <= 0) return Page.FromAddress($.nullptr);
-      let chunk_size = $stack.value(parseInt(requested_pages * Page.kPageSize));
+      if (requested_pages <= 0) return Page.FromAddress(0);
+      let chunk_size = stack.value(utils.to.i32(requested_pages * Page.kPageSize));
 
       if (this.size_ + chunk_size > this.capacity_) {
-        chunk_size = this.capacity_ - this.size_;
+        chunk_size.set(this.capacity_ - this.size_);
         requested_pages = chunk_size >> Page.kPageSizeBits;
     
-        if (requested_pages <= 0) return Page.FromAddress($.nullptr);
+        if (requested_pages <= 0) return Page.FromAddress(0);
       }
 
       let chunk = this.AllocateRawMemory(chunk_size.value, chunk_size, owner.executable());
 
-      if (chunk == 0) return Page.FromAddress($.nullptr);
+      if (chunk == 0) return Page.FromAddress(0);
 
       allocated_pages.value = PagesInChunk(Address.init(null, chunk), chunk_size);
       if (allocated_pages.value == 0) {
         FreeRawMemory(chunk, chunk_size);
-        return Page.FromAddress($.nullptr);
+        return Page.FromAddress(0);
       }
 
       let chunk_id = this.Pop();
-      this.chunks_.at(chunk_id).init(Address.init(null, chunk), chunk_size, owner);
+      this.chunks_.at(chunk_id).init(Address.init(null, chunk), chunk_size.valueOf(), owner);
 
       return this.InitializePagesInChunk(chunk_id, allocated_pages.value, owner);
     };
 
     MemoryAllocator.AllocateRawMemory = function(requested, allocated, executable) {
-      if (this.size_ + requested > this.capacity_) return $.nullptr;
+      if (this.size_ + requested > this.capacity_) return 0;
 
       let mem = OS.Allocate(requested, allocated, executable);
       let alloced = allocated.value;
@@ -1568,7 +1613,7 @@ const v8 = namespace((v8) => {
     MemoryAllocator.CommitPages = function(start, size, owner, num_pages) {
       num_pages.value = PagesInChunk(start, size);
       if (!this.initial_chunk_.Commit(start, size, owner.executable())) {
-        return Page.FromAddress(nullptr);
+        return Page.FromAddress(0);
       }
       Counters.memory_allocated.Increment(size);
       let chunk_id = this.Pop();
@@ -1583,8 +1628,8 @@ const v8 = namespace((v8) => {
     };
 
     MemoryAllocator.Pop = function() {
-      let top = this.top_.valueOf();
-      this.top_ = top - 1;
+      let top = this.top_;
+      this.top_--;
       return this.free_chunk_ids_.at(this.top_.valueOf()).valueOf();
     };
 
@@ -1836,10 +1881,10 @@ const v8 = namespace((v8) => {
 
     PagedSpace[_].AllocateRaw = function(size_in_bytes) {
       let object = this.AllocateLinearly(this.allocation_info_, size_in_bytes);
-      if (object != $.nullptr) return object;
+      if (offsetOf(object) != 0) return object;
 
       object = this.SlowAllocateRaw(size_in_bytes);
-      if (object != $.nullptr) return object;
+      if (offsetOf(object) != 0) return object;
 
       return Failure.RetryAfterGC(size_in_bytes, this.identity());
     };
@@ -1920,7 +1965,7 @@ const v8 = namespace((v8) => {
     
     MapSpaceFreeList[_].Reset = function() {
       this.available_ = 0;
-      this.head_ = $.nullptr;
+      this.head_ = 0;
     }
     
     struct(MapSpaceFreeList[_], {
@@ -2053,7 +2098,7 @@ const v8 = namespace((v8) => {
       
       this.map_space_ = new MapSpace([Heap.kMaxMapSpaceSize, AllocationSpace.MAP_SPACE]);
       //if (this.map_space_.isNullptr()) return false;
-      if (!this.map_space_.Setup($.nullptr, 0)) return false;
+      if (!this.map_space_.Setup(0, 0)) return false;
 
       this.lo_space_ = new LargeObjectSpace([AllocationSpace.LO_SPACE, true]);
       //if (this.lo_space_.isNullptr()) return false;
@@ -2086,7 +2131,7 @@ const v8 = namespace((v8) => {
     };
 
     Heap.AllocateRawMap = function(size_in_bytes) {
-      let result = this.map_space_.deref().AllocateRaw(size_in_bytes);
+      let result = this.map_space_.AllocateRaw(size_in_bytes);
       if (result.IsFailure()) this.old_gen_exhausted_ = true;
       return result;
     };
