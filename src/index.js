@@ -288,7 +288,7 @@ const std = namespace(() => {
   Type.prototype.init = function(offset, value) {
     if (offset == null || offset == 0 || offset == undefined)
       offset = this.isPointer() ? alloc(pointer_size) : alloc(this.size());
-    expect(offset).typeIs("number");
+    //expect(offset).typeIs("number");
     if (this.isPointer())
       return new Pointer(this[sCtor], this[sDepth], offset, value);
     if (this.isPrimitive())
@@ -448,6 +448,7 @@ const std = namespace(() => {
 
   const voidptr = new Type(Void, 1);
   const voidptrptr = new Type(Void, 2);
+  const nullptr = voidptr.init(null, new Void(0));
 
   // implementation of char type
   function Char(offset, value) {
@@ -749,7 +750,7 @@ const std = namespace(() => {
     }
   };
   
-  return { stack, memory, utils, alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
+  return { nullptr, stack, memory, utils, alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
 const { struct, bool, i32, float, string, sOffset } = std;
@@ -811,6 +812,7 @@ const v8 = namespace((v8) => {
       LAST_SPACE: 4
     };
 
+    const byte = u8;
     const Address = u8ptr;
 
     // class FlagValue
@@ -1146,8 +1148,18 @@ const v8 = namespace((v8) => {
     Object[_].IsFailure = function() {
       return (this[sOffset] & kFailureTagMask) == kFailureTag;
     };
+
+    struct(Object[_], { });
     
     Object.kSize = 0;
+
+    const FIELD_ADDR = (p, offset) => {
+      u8ptr.init(null, offsetOf(p) + offset - kHeapObjectTag);
+    };
+
+    const WRITE_FIELD = (p, offset, value) => {
+      (struct.pointer(Object, 2).init(null, FIELD_ADDR(p, offset))).deref(value);
+    };
     
     function HeapObject() {
       Object.call(this, ...arguments);
@@ -1157,6 +1169,10 @@ const v8 = namespace((v8) => {
 
     HeapObject[_].set_map = function(value) {
       this.set_map_word(MapWord.FromMap(value));
+    };
+
+    HeapObject[_].set_map_word = function(map_word) {
+      WRITE_FIELD(this, HeapObject.kMapOffset, struct.pointer(Object).init(null, map_word.value_));
     };
 
     HeapObject.FromAddress = function(address) {
@@ -1190,7 +1206,7 @@ const v8 = namespace((v8) => {
     };
     
     MapWord.FromMap = function(map) {
-      return new MapWord(map[sOffset]);
+      return new MapWord([map]);
     };
     
     struct(MapWord[_], {
@@ -1290,7 +1306,7 @@ const v8 = namespace((v8) => {
     };
 
     Page[_].address = function() {
-      return Address.init(this[sOffset]);
+      return Address.init(null, offsetOf(this));
     };
 
     Page[_].is_valid = function() {
@@ -2160,7 +2176,7 @@ const v8 = namespace((v8) => {
     Heap.lo_space_ = null;
 
     Heap.old_gen_exhausted_ = 0;
-    Heap.meta_map_ = null;
+    Heap.meta_map_ = struct.pointer(Map).init();
 
     Heap.kMaxMapSpaceSize = 8*MB;
     Heap.semispace_size_  = 1*MB;
