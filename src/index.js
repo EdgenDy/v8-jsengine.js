@@ -344,14 +344,12 @@ const std = namespace(() => {
   }
 
   Pointer.prototype.deref = function(value) {
-    let offset = load.u32(this[sOffset]);
+    let offset = this.valueOf();
     if (offset == 0) throw new Error("unable to dereference a null pointer.");
     if (value != undefined) {
       if (this[sDepth] == 1)
         return (new Type(this[sCtor])).init(offset, value);
-      expect(value).typeIs("number");
-      store.u32(this[sOffset], value);
-      return value;
+      return new Pointer(this[sCtor], this[sDepth] - 1, offset, value);
     } else {
       if (this[sDepth] == 1)
         return new this[sCtor](offset);
@@ -384,6 +382,8 @@ const std = namespace(() => {
   };
 
   Pointer[sSize] = pointer_size;
+
+
 
   // implementation of an Type Array
   function TypeArray(type, length) {
@@ -1154,11 +1154,16 @@ const v8 = namespace((v8) => {
     Object.kSize = 0;
 
     const FIELD_ADDR = (p, offset) => {
-      u8ptr.init(null, offsetOf(p) + offset - kHeapObjectTag);
+      //return u8ptr.init(null, offsetOf(p) + offset - kHeapObjectTag);
+      return offsetOf(p) + offset - kHeapObjectTag;
     };
 
     const WRITE_FIELD = (p, offset, value) => {
-      (struct.pointer(Object, 2).init(null, FIELD_ADDR(p, offset))).deref(value);
+      (struct.pointer(Object, 2).init(null, FIELD_ADDR(p, offset))).deref(value+0);
+    };
+
+    const WRITE_BYTE_FIELD = (p, offset, value) => {
+      u8ptr.init(null, FIELD_ADDR(p, offset)).deref(value+0);
     };
     
     function HeapObject() {
@@ -1187,6 +1192,20 @@ const v8 = namespace((v8) => {
     }
     
     Map.prototype = { constructor: Map, __proto__: HeapObject.prototype };
+
+    Map[_].set_instance_type = function(value) {
+      // expect(0 <= value && value > 256).is(true);
+      WRITE_BYTE_FIELD(this, Map.kInstanceTypeOffset, value);
+    };
+
+    Map[_].set_instance_size = function(value) {
+      // expect(0 <= value && value > 256).is(true);
+      WRITE_BYTE_FIELD(this, Map.kInstanceSizeOffset, value);
+    };
+
+    Map[_].set_unused_property_fields = function(value) {
+      WRITE_BYTE_FIELD(this, Map.kUnusedPropertyFieldsOffset, Min(value, 255));
+    };
     
     Map.kInstanceAttributesOffset = HeapObject.kSize;
     Map.kPrototypeOffset = Map.kInstanceAttributesOffset + kIntSize;
@@ -1195,6 +1214,11 @@ const v8 = namespace((v8) => {
         Map.kConstructorOffset + kPointerSize;
     Map.kCodeCacheOffset = Map.kInstanceDescriptorsOffset + kPointerSize;
     Map.kSize = Map.kCodeCacheOffset + kIntSize;
+
+    Map.kInstanceSizeOffset = Map.kInstanceAttributesOffset + 0;
+    Map.kInstanceTypeOffset = Map.kInstanceAttributesOffset + 1;
+    Map.kUnusedPropertyFieldsOffset = Map.kInstanceAttributesOffset + 2;
+    Map.kBitFieldOffset = Map.kInstanceAttributesOffset + 3;
 
     /** @class MapWord */
     function MapWord() {
@@ -2132,6 +2156,10 @@ const v8 = namespace((v8) => {
 
     Heap.CreateInitialMaps = function() {
       let obj = this.AllocatePartialMap(InstanceType.MAP_TYPE, Map.kSize);
+      if (obj.IsFailure()) return false;
+      console.warn("Not yet implemented.");
+      return;
+      //return true;
     };
 
     Heap.AllocatePartialMap = function(instance_type, instance_size) {
