@@ -271,6 +271,18 @@ const std = namespace(() => {
     if (!(this.value instanceof func))
       throw new TypeError("'" + this.value + "' is not an instanceof " + func + ".");
   };
+  
+  Assert.prototype.isNot = function() {
+    let args = arguments;
+    for (let arg in  args)
+      if (this.value == args[arg])
+        throw new Error(this.value + " must not be equals to " + args[arg] + ".");
+  };
+
+  Assert.prototype.isTrue = function() {
+    if (this.value !== true)
+      throw new TypeError("value must be true.");
+  };
 
   function expect(value) {
     return new Assert(value);
@@ -706,6 +718,24 @@ const std = namespace(() => {
     return new Type(func, depth);
   };
 
+  struct.inheritStatic = function(child, base) {
+    for (let name in base)
+      if (Object.hasOwn(base, name))
+        child[name] = base[name];
+  };
+
+  struct["*"] = function(pointer, value) {
+    expect(pointer).isInstanceOf(Pointer);
+    return pointer.deref(value);
+  };
+
+  struct["&"] = function(object) {
+    expect(object).isNot(undefined, null);
+    let offset = object[sOffset];
+    expect(offset).typeIs("number");
+    return offset;
+  };
+
   const tester_buffer = new ArrayBuffer(64);
   const tester_i32 = new Int32Array(tester_buffer);
   const utils = {
@@ -750,7 +780,7 @@ const std = namespace(() => {
     }
   };
   
-  return { nullptr, stack, memory, utils, alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
+  return { expect, nullptr, stack, memory, utils, alloc, free, sOffset, Type, Pointer, struct, set, offsetOf, sizeOf, load, store, u8, u8ptr, u8ptrptr, i32, i32ptr, i32ptrptr, u32, u32ptr, u32ptrptr, voidptr, voidptrptr, char, charptr, charptrptr, string, stringptr, stringptrptr, bool, boolptr, boolptrptr, float, floatptr, floatptrptr };
 });
 
 const { struct, bool, i32, float, string, sOffset } = std;
@@ -760,7 +790,7 @@ const { struct, bool, i32, float, string, sOffset } = std;
 
 const v8 = namespace((v8) => {
   const _ = "prototype";
-  const { load, store, stack, memory, utils, alloc, free, offsetOf, sizeOf, u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
+  const { expect, load, store, stack, memory, utils, alloc, free, offsetOf, sizeOf, u8, u8ptr, i32, i32ptr, u32, u32ptr, char, float, string, bool, struct, voidptr } = std;
   const $type = struct.type;
   const $ptr = struct.pointer;
   
@@ -775,6 +805,8 @@ const v8 = namespace((v8) => {
     // pointer size in 32 bit machine
   
     const kHeapObjectTag = 1;
+    const kHeapObjectTagSize = 2;
+    const kHeapObjectTagMask = (1 << kHeapObjectTagSize) - 1;
 
     const kFailureTag = 3;
     const kFailureTagSize = 2;
@@ -801,6 +833,8 @@ const v8 = namespace((v8) => {
       x = x | (x >> 16);
       return x + 1;
     }
+
+    const HAS_HEAP_OBJECT_TAG = (value) => (value & kHeapObjectTagMask) == kHeapObjectTag;
     
     const AllocationSpace = {
       NEW_SPACE: 0,
@@ -1145,8 +1179,17 @@ const v8 = namespace((v8) => {
       struct.init(this, ...arguments);
     }
 
+    Object[_].IsHeapObject = function() {
+      return HAS_HEAP_OBJECT_TAG(offsetOf(this));
+    };
+
     Object[_].IsFailure = function() {
       return (this[sOffset] & kFailureTagMask) == kFailureTag;
+    };
+
+    Object[_].IsMap = function() {
+      return this.IsHeapObject() && 
+        HeapObject.cast(this).map().deref().instance_type() == InstanceType.MAP_TYPE;
     };
 
     struct(Object[_], { });
@@ -1158,8 +1201,26 @@ const v8 = namespace((v8) => {
       return offsetOf(p) + offset - kHeapObjectTag;
     };
 
+    const READ_FIELD = (p, offset) => {
+      return (struct.pointer(Object, 2).init(null, FIELD_ADDR(p, offset))).deref();
+    };
+
     const WRITE_FIELD = (p, offset, value) => {
       (struct.pointer(Object, 2).init(null, FIELD_ADDR(p, offset))).deref(value+0);
+    };
+
+    const WRITE_INT_FIELD = (p, offset, value) => {
+      i32ptr.init(null, FIELD_ADDR(p, offset)).deref(value);
+      //store.i32(FIELD_ADDR(p, offset), value);
+    };
+
+    const READ_INT_FIELD = (p, offset) => {
+      return i32ptr.init(null, FIELD_ADDR(p, offset)).deref();
+      //return store.i32(FIELD_ADDR(p, offset));
+    };
+
+    const READ_BYTE_FIELD = (p, offset) => {
+      return u8ptr.init(null, FIELD_ADDR(p, offset)).deref();
     };
 
     const WRITE_BYTE_FIELD = (p, offset, value) => {
@@ -1172,8 +1233,16 @@ const v8 = namespace((v8) => {
     
     HeapObject.prototype = { constructor: HeapObject, __proto__: Object.prototype };
 
+    HeapObject[_].map = function() {
+      return this.map_word().ToMap();
+    };
+
     HeapObject[_].set_map = function(value) {
       this.set_map_word(MapWord.FromMap(value));
+    };
+
+    HeapObject[_].map_word = function() {
+      return new MapWord([u8ptr.init(null, READ_FIELD(this, HeapObject.kMapOffset))]);
     };
 
     HeapObject[_].set_map_word = function(map_word) {
@@ -1182,6 +1251,11 @@ const v8 = namespace((v8) => {
 
     HeapObject.FromAddress = function(address) {
       return new HeapObject(address + kHeapObjectTag);
+    };
+
+    HeapObject.cast = function(object) { // Object*
+      expect(object.IsHeapObject()).isTrue();
+      return new HeapObject(offsetOf(object));
     };
     
     HeapObject.kMapOffset = Object.kSize;
@@ -1193,18 +1267,31 @@ const v8 = namespace((v8) => {
     
     Map.prototype = { constructor: Map, __proto__: HeapObject.prototype };
 
-    Map[_].set_instance_type = function(value) {
-      // expect(0 <= value && value > 256).is(true);
-      WRITE_BYTE_FIELD(this, Map.kInstanceTypeOffset, value);
-    };
-
     Map[_].set_instance_size = function(value) {
       // expect(0 <= value && value > 256).is(true);
       WRITE_BYTE_FIELD(this, Map.kInstanceSizeOffset, value);
     };
 
+    Map[_].instance_size = function() {
+      return READ_BYTE_FIELD(this, Map.kInstanceSizeOffset);
+    };
+
+    Map[_].instance_type = function() {
+      return READ_BYTE_FIELD(this, Map.kInstanceTypeOffset);
+    };
+
+    Map[_].set_instance_type = function(value) {
+      // expect(0 <= value && value > 256).is(true);
+      WRITE_BYTE_FIELD(this, Map.kInstanceTypeOffset, value);
+    };
+
     Map[_].set_unused_property_fields = function(value) {
       WRITE_BYTE_FIELD(this, Map.kUnusedPropertyFieldsOffset, Min(value, 255));
+    };
+
+    Map.cast = function(object) { // Object* - HeapObject
+      expect(struct.type(Object).init(offsetOf(object)).IsMap()).isTrue();
+      return new Map(offsetOf(object));
     };
     
     Map.kInstanceAttributesOffset = HeapObject.kSize;
@@ -1228,6 +1315,10 @@ const v8 = namespace((v8) => {
     MapWord[_].MapWord = function(value) {
       this.value_ = value;
     };
+
+    MapWord[_].ToMap = function() {
+      return struct.pointer(Map).init(null, this.value_);
+    };
     
     MapWord.FromMap = function(map) {
       return new MapWord([map]);
@@ -1236,6 +1327,60 @@ const v8 = namespace((v8) => {
     struct(MapWord[_], {
       value_: u32ptr
     });
+
+    /** @class Array */
+    function Array() {
+      struct.init(this, ...arguments);
+    }
+
+    Array.prototype = { constructor: Array, __proto__: HeapObject.prototype };
+
+    Array[_].set_length = function(value) {
+      WRITE_INT_FIELD(this, Array.kLengthOffset, value);
+    };
+
+    Array.kLengthOffset = HeapObject.kSize;
+    Array.kHeaderSize = Array.kLengthOffset + kIntSize;
+
+    struct(Array, {});
+
+
+    /** @class FixedArray */
+    function FixedArray() {
+      struct.init(this, ...arguments);
+    }
+
+    FixedArray.prototype = { constructor: FixedArray, __proto__: Array.prototype };
+
+    FixedArray.SizeFor = function(length) {
+      return this.kHeaderSize + length * kPointerSize;
+    };
+
+    FixedArray.cast = function(object) {
+      return new FixedArray(offsetOf(object));
+    };
+
+    struct.inheritStatic(FixedArray, Array);
+    struct(FixedArray, {});
+
+    /** @class Oddball */
+    // The Oddball describes objects null, undefined, true, and false.
+    function Oddball() {
+      struct.init(this, ...arguments);
+    }
+
+    Oddball.prototype = { constructor: Oddball, __proto__: HeapObject.prototype };
+
+    Oddball.cast = function(object) {
+      expect(struct.type(Object).init(offsetOf(object)).IsOddball()).isTrue();
+      return new Oddball(offsetOf(object));
+    };
+
+    Oddball.kToStringOffset = HeapObject.kSize;
+    Oddball.kToNumberOffset = Oddball.kToStringOffset + kPointerSize;
+    Oddball.kSize = Oddball.kToNumberOffset + kPointerSize;
+
+    struct(Oddball, {});
 
     /** @class V8 */
     const V8 = new (function V8() {});
@@ -2157,16 +2302,34 @@ const v8 = namespace((v8) => {
     Heap.CreateInitialMaps = function() {
       let obj = this.AllocatePartialMap(InstanceType.MAP_TYPE, Map.kSize);
       if (obj.IsFailure()) return false;
-      console.warn("Not yet implemented.");
-      return;
-      //return true;
+
+      this.meta_map_ = struct.pointer(Map).init(null, offsetOf(obj));
+      struct["*"](this.meta_map()).set_map(this.meta_map());
+
+      obj = this.AllocatePartialMap(InstanceType.FIXED_ARRAY_TYPE, Array.kHeaderSize);
+      if (obj.IsFailure()) return false;
+      this.fixed_array_map_ = Map.cast(obj);
+
+      obj = this.AllocatePartialMap(InstanceType.ODDBALL_TYPE, Oddball.kSize);
+      if (obj.IsFailure()) return false;
+      this.oddball_map_ = Map.cast(obj);
+
+      obj = this.AllocateEmptyFixedArray();
+      if (obj.IsFailure()) return false;
+      this.empty_fixed_array_ = FixedArray.cast(obj);
+      
+      obj = this.Allocate(this.oddball_map(), AllocationSpace.CODE_SPACE);
+      if (obj.IsFailure()) return false;
+      null_value_ = obj;
+
+      return true;
     };
 
     Heap.AllocatePartialMap = function(instance_type, instance_size) {
       let result = this.AllocateRawMap(Map.kSize);
       if (result.IsFailure()) return result;
 
-      let map = new Map(result[sOffset]);
+      let map = new Map(offsetOf(result));
       map.set_map(this.meta_map());
       map.set_instance_type(instance_type);
       map.set_instance_size(instance_size);
@@ -2180,12 +2343,58 @@ const v8 = namespace((v8) => {
       return result;
     };
 
+    Heap.AllocateEmptyFixedArray = function() {
+      let size = FixedArray.SizeFor(0);
+      let result = this.AllocateRaw(size, AllocationSpace.CODE_SPACE);
+      if (result.IsFailure()) return result;
+
+      let array = new Array(offsetOf(result));
+      array.set_map(this.fixed_array_map());
+      array.set_length(0);
+      return result;
+    };
+
+    Heap.AllocateRaw = function(size_in_bytes, space) {
+      if (AllocationSpace.NEW_SPACE == space) {
+        return this.new_space_.AllocateRaw(size_in_bytes);
+      }
+
+      let result = null;
+      if (AllocationSpace.OLD_SPACE == space) {
+        result = this.old_space_.AllocateRaw(size_in_bytes);
+      } else if (AllocationSpace.CODE_SPACE == space) {
+        result = this.code_space_.AllocateRaw(size_in_bytes);
+      } else if (AllocationSpace.LO_SPACE == space) {
+        result = this.lo_space_.AllocateRaw(size_in_bytes);
+      } else {
+        //ASSERT(AllocationSpace.MAP_SPACE == space);
+        result = map_space_.AllocateRaw(size_in_bytes);
+      }
+      if (result.IsFailure()) this.old_gen_exhausted_ = true;
+      return result;
+    };
+
+    Heap.Allocate = function(map, space) {
+      let result = this.AllocateRaw(map.instance_size(), space);
+      if (result.IsFailure()) return result;
+      HeapObject.cast(result).set_map(offsetOf(map));
+      return result;
+    };
+
     Heap.MaxCapacity = function() {
       return this.young_generation_size_ + this.old_generation_size_;
     }
 
     Heap.meta_map = function() {
       return this.meta_map_;
+    };
+
+    Heap.fixed_array_map = function() {
+      return this.fixed_array_map_;
+    };
+
+    Heap.oddball_map = function() {
+      return Heap.oddball_map_;
     };
 
     Heap.semispace_size_ = 0;
@@ -2205,6 +2414,8 @@ const v8 = namespace((v8) => {
 
     Heap.old_gen_exhausted_ = 0;
     Heap.meta_map_ = struct.pointer(Map).init();
+    Heap.fixed_array_map_ = struct.pointer(Map).init();
+    Heap.oddball_map_ = struct.pointer(Map).init();
 
     Heap.kMaxMapSpaceSize = 8*MB;
     Heap.semispace_size_  = 1*MB;
